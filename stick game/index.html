@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Stick-Figure Sneak</title>
+<style>
+  html,body { 
+    height:100%; 
+    margin:0; 
+    background:#fff; 
+    color:#000; 
+    font-family:Arial,Helvetica,sans-serif; 
+  }
+
+  #game { 
+    display:block; 
+    margin:20px auto; 
+    background:#f5f5f5; 
+    border:6px solid #333; 
+    box-shadow:0 10px 30px rgba(0,0,0,0.3); 
+  }
+
+  .ui { 
+    width:800px; 
+    margin: 0 auto; 
+    display:flex; 
+    justify-content:space-between; 
+    align-items:center; 
+    gap:8px; 
+    color:#000; 
+  }
+
+  .hint { font-size:13px; opacity:0.9; }
+  .level { font-weight:700; }
+
+  button { 
+    background:#2b2b2b; 
+    border:1px solid #444; 
+    color:#fff; 
+    padding:6px 10px; 
+    border-radius:6px; 
+    cursor:pointer; 
+  }
+  button:hover { filter:brightness(1.1); }
+
+  footer { 
+    width:800px; 
+    margin:6px auto; 
+    color:#444; 
+    font-size:12px; 
+    text-align:right; 
+  }
+</style>
+</head>
+<body>
+
+<div class="ui">
+  <div class="level">Level: <span id="levelLabel">1</span></div>
+  <div class="hint">Move with ←↑→↓ or WASD — Avoid the RED cones — Reach the green square</div>
+  <div>
+    <button id="restartBtn">Restart Level</button>
+  </div>
+</div>
+
+<canvas id="game" width="800" height="600"></canvas>
+<footer>Stick-Figure Sneak</footer>
+
+<script>
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const LEVELS = [
+  
+  {
+    playerStart: { x: 60, y: 540 },
+    goal: { x: 740, y: 60, w: 40, h: 40 },
+    cameras: [
+      { x: 400, y: 300, rotSpeed: 0.8, dist: 260, fov: Math.PI/5, angle: 0 },
+    ],
+    walls: [
+      { x: 200, y: 120, w: 400, h: 20 },
+      { x: 200, y: 460, w: 400, h: 20 },
+      { x: 200, y: 140, w: 20, h: 320 },
+      { x: 580, y: 140, w: 20, h: 320 },
+    ]
+  },
+
+  {
+    playerStart: { x: 40, y: 300 },
+    goal: { x: 760, y: 300, w: 40, h: 40 },
+    cameras: [
+      { x: 200, y: 150, rotSpeed: 1.2, dist: 200, fov: Math.PI/5, angle: -0.8 },
+      { x: 200, y: 450, rotSpeed: -1.1, dist: 200, fov: Math.PI/5, angle: 0.8 },
+      { x: 600, y: 300, rotSpeed: 0.9, dist: 240, fov: Math.PI/6, angle: Math.PI },
+    ],
+    walls: [
+      { x: 260, y: 120, w: 20, h: 360 },
+      { x: 520, y: 120, w: 20, h: 360 },
+      { x: 300, y: 260, w: 200, h: 20 },
+    ]
+  }
+];
+
+let levelIndex = 0;
+let level = JSON.parse(JSON.stringify(LEVELS[levelIndex]));
+const player = { x: 0, y: 0, r: 10, speed: 180 };
+let keys = {};
+let lastTime = null;
+let caughtCooldown = 0;
+
+
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup',   e => keys[e.key.toLowerCase()] = false);
+
+document.getElementById('restartBtn').addEventListener('click', resetLevel);
+
+function resetLevel() {
+  level = JSON.parse(JSON.stringify(LEVELS[levelIndex]));
+  player.x = level.playerStart.x;
+  player.y = level.playerStart.y;
+  caughtCooldown = 0;
+  updateUI();
+}
+
+function nextLevel() {
+  levelIndex++;
+  if (levelIndex >= LEVELS.length) {
+    levelIndex = 0;
+  }
+  resetLevel();
+}
+
+function updateUI() {
+  document.getElementById("levelLabel").textContent = (levelIndex + 1);
+}
+
+
+function normAngle(a) {
+  while (a <= -Math.PI) a += 2*Math.PI;
+  while (a >  Math.PI) a -= 2*Math.PI;
+  return a;
+}
+
+function segmentIntersectsSegment(x1,y1,x2,y2,x3,y3,x4,y4) {
+  const ccw = (ax,ay,bx,by,cx,cy) =>
+    (cy - ay)*(bx - ax) > (by - ay)*(cx - ax);
+  return ccw(x1,y1,x3,y3,x4,y4) !== ccw(x2,y2,x3,y3,x4,y4) &&
+         ccw(x1,y1,x2,y2,x3,y3) !== ccw(x1,y1,x2,y2,x4,y4);
+}
+
+function segmentIntersectsRect(x1,y1,x2,y2, r) {
+  if (segmentIntersectsSegment(x1,y1,x2,y2, r.x, r.y, r.x+r.w, r.y)) return true;
+  if (segmentIntersectsSegment(x1,y1,x2,y2, r.x+r.w, r.y, r.x+r.w, r.y+r.h)) return true;
+  if (segmentIntersectsSegment(x1,y1,x2,y2, r.x+r.w, r.y+r.h, r.x, r.y+r.h)) return true;
+  if (segmentIntersectsSegment(x1,y1,x2,y2, r.x, r.y+r.h, r.x, r.y)) return true;
+  return false;
+}
+
+function hasLineOfSight(x1,y1,x2,y2) {
+  for (const w of level.walls) {
+    if (segmentIntersectsRect(x1,y1,x2,y2,w)) return false;
+  }
+  return true;
+}
+
+
+resetLevel();
+
+function update(dt) {
+  let vx = 0, vy = 0;
+  if (keys['arrowleft']||keys['a']) vx -= 1;
+  if (keys['arrowright']||keys['d']) vx += 1;
+  if (keys['arrowup']||keys['w']) vy -= 1;
+  if (keys['arrowdown']||keys['s']) vy += 1;
+
+  if (vx || vy) {
+    const len = Math.hypot(vx,vy);
+    vx/=len; vy/=len;
+    player.x += vx * player.speed * dt;
+    player.y += vy * player.speed * dt;
+  }
+
+  player.x = Math.max(player.r, Math.min(canvas.width-player.r, player.x));
+  player.y = Math.max(player.r, Math.min(canvas.height-player.r, player.y));
+
+  for (const cam of level.cameras) {
+    cam.angle = normAngle(cam.angle + cam.rotSpeed * dt);
+  }
+
+  if (caughtCooldown <= 0) {
+    for (const cam of level.cameras) {
+      const dx = player.x - cam.x;
+      const dy = player.y - cam.y;
+      const dist = Math.hypot(dx, dy);
+
+      if (dist <= cam.dist) {
+        const angleToPlayer = Math.atan2(dy, dx);
+        const da = Math.abs(normAngle(angleToPlayer - cam.angle));
+
+        if (da <= cam.fov/2 && hasLineOfSight(cam.x,cam.y,player.x,player.y)) {
+          onCaught();
+          break;
+        }
+      }
+    }
+  } else {
+    caughtCooldown -= dt;
+  }
+
+  const g = level.goal;
+  if (player.x > g.x && player.x < g.x+g.w &&
+      player.y > g.y && player.y < g.y+g.h) {
+    nextLevel(); 
+  }
+}
+
+let flashTimer = 0;
+
+function onCaught() {
+  flashTimer = 0.25;
+  caughtCooldown = 0.8;
+  player.x = level.playerStart.x;
+  player.y = level.playerStart.y;
+}
+
+
+function render() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  if (flashTimer > 0) {
+    ctx.fillStyle = "rgba(255,0,0,0.15)";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    flashTimer -= 1/60;
+  }
+
+  
+  ctx.fillStyle = "#999";
+  for (const w of level.walls) ctx.fillRect(w.x,w.y,w.w,w.h);
+
+  
+  const g = level.goal;
+  ctx.fillStyle = "#22aa22";
+  ctx.fillRect(g.x,g.y,g.w,g.h);
+
+  for (const cam of level.cameras) {
+    ctx.save();
+    ctx.translate(cam.x, cam.y);
+
+    const left = cam.angle - cam.fov/2;
+    const right = cam.angle + cam.fov/2;
+    const ax = Math.cos(left)*cam.dist, ay = Math.sin(left)*cam.dist;
+    const bx = Math.cos(right)*cam.dist, by = Math.sin(right)*cam.dist;
+
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    ctx.lineTo(ax,ay);
+    ctx.arc(0,0,cam.dist,left,right);
+    ctx.closePath();
+
+    ctx.fillStyle = "rgba(255,0,0,0.25)"; 
+    ctx.fill();
+
+  
+    ctx.rotate(cam.angle);
+    ctx.fillStyle = "#444";
+    ctx.fillRect(-10,-7,20,14);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(6,-4,6,8);
+    ctx.restore();
+
+    
+    ctx.beginPath();
+    ctx.arc(cam.x, cam.y, 4, 0, Math.PI*2);
+    ctx.fillStyle = "#222";
+    ctx.fill();
+  }
+
+
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  ctx.strokeStyle = "#000";
+  ctx.lineWidth = 3;
+
+  ctx.beginPath();
+  ctx.arc(0,-8,8,0,Math.PI*2);
+  ctx.moveTo(0,0); ctx.lineTo(0,18);
+  ctx.moveTo(0,6); ctx.lineTo(-12,-2);
+  ctx.moveTo(0,6); ctx.lineTo(12,-2);
+  ctx.moveTo(0,18); ctx.lineTo(-10,34);
+  ctx.moveTo(0,18); ctx.lineTo(10,34);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function loop(t) {
+  if (!lastTime) lastTime = t;
+  const dt = Math.min((t-lastTime)/1000, 0.033);
+  lastTime = t;
+
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+
+</body>
+</html>
+
+
+
+  
